@@ -1,0 +1,62 @@
+name: Manual Artifact Cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      retention_days:
+        description: 'Delete artifacts older than (days) – set 0 to delete all'
+        required: true
+        default: 0
+        type: number
+
+permissions:
+  actions: write   # needed to delete artifacts
+  contents: read   # only to checkout the repo (optional)
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository (optional, only for safety)
+        uses: actions/checkout@v4
+
+      - name: Install GitHub CLI
+        run: |
+          type -p curl >/dev/null || sudo apt install curl -y
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt update
+          sudo apt install gh -y
+
+      - name: Authenticate gh with GITHUB_TOKEN
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+
+      - name: List all artifacts before deletion
+        run: gh api repos/${{ github.repository }}/actions/artifacts --paginate
+
+      - name: Delete artifacts (older than input days)
+        env:
+          DAYS: ${{ github.event.inputs.retention_days }}
+        run: |
+          # Convert retention days to a date cutoff (ISO 8601)
+          if [ "$DAYS" -eq 0 ]; then
+            echo "Deleting ALL artifacts in ${{ github.repository }}"
+            gh api repos/${{ github.repository }}/actions/artifacts --paginate --jq '.artifacts[].id' | \
+              while read id; do
+                echo "Deleting artifact ID $id"
+                gh api -X DELETE repos/${{ github.repository }}/actions/artifacts/$id
+              done
+          else
+            cutoff=$(date -d "$DAYS days ago" --iso-8601=seconds)
+            echo "Deleting artifacts created before $cutoff"
+            gh api repos/${{ github.repository }}/actions/artifacts --paginate --jq ".artifacts[] | select(.created_at < \"$cutoff\") | .id" | \
+              while read id; do
+                echo "Deleting artifact ID $id"
+                gh api -X DELETE repos/${{ github.repository }}/actions/artifacts/$id
+              done
+          fi
+
+      - name: Show remaining artifacts
+        run: |
+          count=$(gh api repos/${{ github.repository }}/actions/artifacts --paginate --jq '.artifacts | length')
+          echo "Remaining artifacts: $count"
