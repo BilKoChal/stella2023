@@ -872,15 +872,15 @@ void retro_reset()
 
 /* ---- Config-driven auto-load save state (cross-platform) ------------ *
  * On the first frame after a ROM loads, the core reads a config file that
- * sits next to it and is named after it: e.g. "stella2023_libretro.cfg" beside
- * "stella2023_libretro.dll" (Windows) or "stella2023_libretro_android.cfg" beside
- * "stella2023_libretro_android.so" (Android). If enabled, it loads:
+ * sits next to it and is named after it: e.g. "stella_libretro.cfg" beside
+ * "stella_libretro.dll" (Windows) or "stella_libretro_android.cfg" beside
+ * "stella_libretro_android.so" (Android). If enabled, it loads:
  *
  *     <save_path>/<rom-name-without-extension>.<state_ext>
  *
- * Example config (stella2023_libretro.cfg):
+ * Example config (stella_libretro.cfg):
  *     enabled   = 1
- *     save_path = G:\RetroBat\saves\atari2600\libretro.stella2023
+ *     save_path = G:\RetroBat\saves\atari2600\libretro.stella
  *     state_ext = state.auto
  *
  * A line "[autoload] ..." is written both to the RetroArch log and to
@@ -911,6 +911,7 @@ static bool autoload_hotkey_pending     = false;  /* Num1 pressed → reset + au
 static char autoload_dir[AUTOLOAD_MAX_PATH]      = {0};   /* folder the core lives in */
 static char autoload_rom_path[AUTOLOAD_MAX_PATH] = {0};   /* full path of the loaded ROM   */
 static char autoload_core_name[64]      = {0};   /* this core's file name, no ext */
+static char autoload_log_path[AUTOLOAD_MAX_PATH + 32] = {0};  /* resolved log file path */
 
 /* Directory that THIS core (.dll/.so) lives in. */
 static void autoload_get_self_dir(char *out, size_t out_size)
@@ -945,7 +946,7 @@ static void autoload_get_self_dir(char *out, size_t out_size)
 }
 
 /* This core's own file name, without directory or extension
- * (e.g. "stella2023_libretro" or "stella2023_libretro_android"). */
+ * (e.g. "stella_libretro" or "stella_libretro_android"). */
 static void autoload_get_self_name(char *out, size_t out_size)
 {
    out[0] = '\0';
@@ -996,6 +997,47 @@ static void autoload_get_self_cfg(char *out, size_t out_size)
       snprintf(out, out_size, "%s.cfg", name);
 }
 
+/* Resolve and cache the autoload.log path.
+ * Priority: 1) beside the core (autoload_dir), 2) current working directory. */
+static void autoload_resolve_log_path(void)
+{
+   if (autoload_log_path[0] != '\0')
+      return;   /* already resolved */
+
+   if (autoload_dir[0] != '\0')
+   {
+      snprintf(autoload_log_path, sizeof(autoload_log_path),
+               "%s%cautoload.log", autoload_dir, AUTOLOAD_PATH_SEP);
+      /* verify we can actually write here */
+      FILE *fp = fopen(autoload_log_path, "a");
+      if (fp) { fclose(fp); return; }
+      /* can't write beside the core — fall through */
+      if (log_cb)
+         log_cb(RETRO_LOG_WARN,
+                "[autoload] can't write autoload.log beside core (path: %s), "
+                "trying current directory\n", autoload_log_path);
+   }
+
+   /* fallback: current working directory */
+   snprintf(autoload_log_path, sizeof(autoload_log_path), "autoload.log");
+   FILE *fp = fopen(autoload_log_path, "a");
+   if (fp)
+   {
+      fclose(fp);
+      if (log_cb)
+         log_cb(RETRO_LOG_INFO,
+                "[autoload] autoload.log will be written to current directory\n");
+   }
+   else
+   {
+      autoload_log_path[0] = '\0';  /* nothing works */
+      if (log_cb)
+         log_cb(RETRO_LOG_WARN,
+                "[autoload] can't write autoload.log anywhere — "
+                "check file permissions\n");
+   }
+}
+
 /* Write a line to autoload.log next to the core AND to the RetroArch log. */
 static void autoload_logf(const char *fmt, ...)
 {
@@ -1008,12 +1050,11 @@ static void autoload_logf(const char *fmt, ...)
    if (log_cb)
       log_cb(RETRO_LOG_INFO, "[autoload] %s\n", line);
 
-   if (autoload_dir[0] != '\0')
+   autoload_resolve_log_path();
+
+   if (autoload_log_path[0] != '\0')
    {
-      char logpath[AUTOLOAD_MAX_PATH + 32];
-      FILE *fp;
-      snprintf(logpath, sizeof(logpath), "%s%cautoload.log", autoload_dir, AUTOLOAD_PATH_SEP);
-      fp = fopen(logpath, "a");
+      FILE *fp = fopen(autoload_log_path, "a");
       if (fp) { fprintf(fp, "%s\n", line); fclose(fp); }
    }
 }
@@ -1022,7 +1063,6 @@ static void autoload_logf(const char *fmt, ...)
  * Runs are delimited by lines beginning with "--- autoload run ---". */
 static void autoload_log_rotate(int keep_runs)
 {
-   char        logpath[AUTOLOAD_MAX_PATH + 32];
    const char *marker = "--- autoload run ---";
    FILE       *fp;
    long        fsize;
@@ -1030,11 +1070,11 @@ static void autoload_log_rotate(int keep_runs)
    int         count = 0, seen = 0;
    size_t      got;
 
-   if (autoload_dir[0] == '\0')
+   autoload_resolve_log_path();
+   if (autoload_log_path[0] == '\0')
       return;
-   snprintf(logpath, sizeof(logpath), "%s%cautoload.log", autoload_dir, AUTOLOAD_PATH_SEP);
 
-   fp = fopen(logpath, "rb");
+   fp = fopen(autoload_log_path, "rb");
    if (!fp)
       return;                       /* no log yet */
    fseek(fp, 0, SEEK_END);
@@ -1060,7 +1100,7 @@ static void autoload_log_rotate(int keep_runs)
          if (++seen == drop + 1) { cut = p; break; }
          p += 1;
       }
-      fp = fopen(logpath, "wb");
+      fp = fopen(autoload_log_path, "wb");
       if (fp) { fwrite(cut, 1, strlen(cut), fp); fclose(fp); }
    }
    free(data);
@@ -1214,16 +1254,26 @@ static void autoload_try_load_state(void)
    FILE           *fp;
 
    autoload_get_self_dir(autoload_dir, sizeof(autoload_dir));
-   if (autoload_dir[0] == '\0')
-   {
-      if (log_cb)
-         log_cb(RETRO_LOG_WARN,
-               "[autoload] could not resolve core directory\n");
-      return;
-   }
+   /* Even if core directory is unknown, we can still log to the RetroArch log
+    * and possibly to a fallback autoload.log (current working directory). */
+   autoload_log_rotate(AUTOLOAD_MAX_RUNS - 1);  /* keep 24; this run makes 25 */
 
    autoload_get_self_name(autoload_core_name, sizeof(autoload_core_name));
-   autoload_log_rotate(AUTOLOAD_MAX_RUNS - 1);  /* keep 24; this run makes 25 */
+
+   if (autoload_dir[0] == '\0')
+   {
+      {
+         time_t     t  = time(NULL);
+         struct tm *lt = localtime(&t);
+         char       ts[32];
+         if (lt) strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", lt);
+         else    ts[0] = '\0';
+         autoload_logf("--- autoload run --- core=%s  %s", autoload_core_name[0] ? autoload_core_name : "unknown", ts);
+      }
+      autoload_logf("RESULT        : could not resolve core directory — "
+                    "dladdr/GetModuleHandleEx failed");
+      return;
+   }
 
    {
       time_t     t  = time(NULL);
