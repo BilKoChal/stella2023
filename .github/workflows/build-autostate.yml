@@ -1,0 +1,243 @@
+# .github/workflows/build-autostate.yml
+#
+# Builds the patched stella2023_libretro core for:
+#   • Windows 64-bit  (MinGW cross-compile on Ubuntu)
+#   • Windows 32-bit  (MinGW cross-compile on Ubuntu)
+#   • Linux 64-bit
+#   • Android arm64-v8a
+#   • Android armeabi-v7a
+#   • Android x86_64
+#
+# Artifacts are uploaded so you can download them directly from the
+# GitHub Actions run page without needing a release.
+#
+# Trigger: every push and pull-request, plus manual dispatch.
+
+name: Build stella2023 autostate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:      # allows one-click manual runs from the Actions tab
+
+jobs:
+  # ------------------------------------------------------------------ #
+  # Windows 64-bit (MinGW cross-compile)                               #
+  # ------------------------------------------------------------------ #
+  build-win64:
+    name: Windows x64 (MinGW)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install MinGW-w64 toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-mingw-w64-x86-64 \
+            g++-mingw-w64-x86-64 \
+            make
+
+      - name: Build
+        run: |
+          cd src/os/libretro
+          make platform=win \
+               CC=x86_64-w64-mingw32-gcc \
+               CXX=x86_64-w64-mingw32-g++ \
+               -j$(nproc)
+
+      - name: Rename artifact
+        run: mv src/os/libretro/stella2023_libretro.dll stella2023_libretro_win64.dll 2>/dev/null || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stella2023_libretro_win64
+          path: stella2023_libretro_win64.dll
+
+  # ------------------------------------------------------------------ #
+  # Windows 32-bit (MinGW cross-compile)                               #
+  # ------------------------------------------------------------------ #
+  build-win32:
+    name: Windows x86 (MinGW)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install MinGW-w64 toolchain (32-bit)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-mingw-w64-i686 \
+            g++-mingw-w64-i686 \
+            make
+
+      - name: Build
+        run: |
+          cd src/os/libretro
+          make platform=win \
+               CC=i686-w64-mingw32-gcc \
+               CXX=i686-w64-mingw32-g++ \
+               -j$(nproc)
+
+      - name: Rename artifact
+        run: mv src/os/libretro/stella2023_libretro.dll stella2023_libretro_win32.dll 2>/dev/null || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stella2023_libretro_win32
+          path: stella2023_libretro_win32.dll
+
+  # ------------------------------------------------------------------ #
+  # Linux 64-bit                                                       #
+  # ------------------------------------------------------------------ #
+  build-linux64:
+    name: Linux x64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            make
+
+      - name: Build
+        run: |
+          cd src/os/libretro
+          make platform=unix \
+               -j$(nproc)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stella2023_libretro_linux64
+          path: src/os/libretro/stella2023_libretro.so
+
+  # ------------------------------------------------------------------ #
+  # Android — arm64-v8a / armeabi-v7a / x86_64                        #
+  #                                                                    #
+  # The stella2023 Makefile has no dedicated "android" platform;       #
+  # it falls through to unix. We use platform=unix with the NDK       #
+  # Clang toolchain overriding CC/CXX, and override SHARED to drop    #
+  # the version-script (Android linker does not support it).          #
+  # -ldl links libdl which provides dladdr() used by the autoload     #
+  #   block to locate the core's own .so path at runtime.             #
+  # -static-libstdc++ statically links libc++ so the core won't       #
+  #   depend on libc++_shared.so at runtime (which is missing         #
+  #   on most Android devices when loading libretro cores).           #
+  #                                                                    #
+  # NDK discovery: instead of hard-coding a version that may not be   #
+  # available, we find the latest installed NDK on the runner.        #
+  # ------------------------------------------------------------------ #
+  build-android:
+    name: Android ${{ matrix.abi }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: arm64-v8a
+            ndk_target: aarch64-linux-android
+            artifact_suffix: android_arm64-v8a
+
+          - abi: armeabi-v7a
+            ndk_target: armv7a-linux-androideabi
+            artifact_suffix: android_armeabi-v7a
+
+          - abi: x86_64
+            ndk_target: x86_64-linux-android
+            artifact_suffix: android_x86_64
+
+    env:
+      ANDROID_API: 21
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup NDK
+        run: |
+          # Try to find an already-installed NDK with a valid toolchain
+          for ndk_dir in ${ANDROID_HOME}/ndk/*/; do
+            if [ -f "${ndk_dir}toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ]; then
+              echo "NDK_ROOT=${ndk_dir%/}" >> $GITHUB_ENV
+              echo "Found pre-installed NDK: ${ndk_dir%/}"
+              exit 0
+            fi
+          done
+
+          # No usable NDK found — install one via sdkmanager
+          # First locate sdkmanager (path varies between runner images)
+          SDKMANAGER=$(find "${ANDROID_HOME}" -name "sdkmanager" -type f 2>/dev/null | head -1)
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: No sdkmanager found and no NDK pre-installed"
+            exit 1
+          fi
+
+          echo "Installing NDK via: $SDKMANAGER"
+          # Install a widely-available NDK version
+          yes | "$SDKMANAGER" "ndk;27.0.12077973" 2>&1 | tail -5
+
+          NDK_ROOT="${ANDROID_HOME}/ndk/27.0.12077973"
+          if [ ! -f "${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ]; then
+            echo "ERROR: NDK installation failed — clang not found"
+            exit 1
+          fi
+
+          echo "NDK_ROOT=${NDK_ROOT}" >> $GITHUB_ENV
+          echo "Installed NDK: ${NDK_ROOT}"
+
+      - name: Install make
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends make
+
+      - name: Build
+        run: |
+          echo "Using NDK_ROOT=$NDK_ROOT"
+          TOOLCHAIN=${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64
+          CC="${TOOLCHAIN}/bin/${{ matrix.ndk_target }}${{ env.ANDROID_API }}-clang"
+          CXX="${TOOLCHAIN}/bin/${{ matrix.ndk_target }}${{ env.ANDROID_API }}-clang++"
+          AR="${TOOLCHAIN}/bin/llvm-ar"
+          RANLIB="${TOOLCHAIN}/bin/llvm-ranlib"
+          STRIP="${TOOLCHAIN}/bin/llvm-strip"
+
+          # Verify the compiler actually exists before starting the build
+          if [ ! -f "$CC" ]; then
+            echo "ERROR: Compiler not found: $CC"
+            echo "Listing available compilers:"
+            ls -la "${TOOLCHAIN}/bin/"*clang* || true
+            exit 1
+          fi
+
+          # platform=unix sets TARGET=stella2023_libretro.so and fpic=-fPIC
+          # We override SHARED: Android linker doesn't support --version-script
+          # -ldl is essential for dladdr() used by autoload self-detection
+          # -static-libstdc++ statically links libc++ so the core won't
+          #   depend on libc++_shared.so at runtime.
+          cd src/os/libretro
+          make platform=unix \
+            CC="$CC" \
+            CXX="$CXX" \
+            AR="$AR" \
+            RANLIB="$RANLIB" \
+            STRIP="$STRIP" \
+            SHARED="-shared -fPIC" \
+            LDFLAGS="-ldl -static-libstdc++" \
+            -j$(nproc)
+
+      - name: Stage artifact
+        run: |
+          cp src/os/libretro/stella2023_libretro.so stella2023_libretro_${{ matrix.artifact_suffix }}.so
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stella2023_libretro_${{ matrix.artifact_suffix }}
+          path: stella2023_libretro_${{ matrix.artifact_suffix }}.so
