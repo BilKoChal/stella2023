@@ -53,6 +53,39 @@ static unsigned input_devices[4];
 static int32_t input_crosshair[2];
 static Controller::Type input_type[2];
 
+/* ---- Autoload: macros and globals ---------------------------------- *
+ * Must appear BEFORE retro_load_game (which uses autoload_rom_path and
+ * autoload_state_pending) and BEFORE the autoload helper block (which
+ * uses AUTOLOAD_MAX_PATH, AUTOLOAD_PATH_SEP, etc.). The helper functions
+ * themselves are in the block further down, just before retro_run(). */
+
+#ifdef _WIN32
+#include <windows.h>
+#include <time.h>
+#define AUTOLOAD_STRCASECMP _stricmp
+#define AUTOLOAD_MAX_PATH   MAX_PATH
+#define AUTOLOAD_PATH_SEP   '\\'
+#else
+extern "C" {
+#include <dlfcn.h>
+}
+#include <time.h>
+#include <strings.h>
+#define AUTOLOAD_STRCASECMP strcasecmp
+#define AUTOLOAD_MAX_PATH   4096
+#define AUTOLOAD_PATH_SEP   '/'
+#endif
+
+#define AUTOLOAD_MAX_RUNS  25   /* keep only the latest N runs in autoload.log */
+#define AUTOLOAD_MAX_PATHS 16   /* max number of save_path entries in the config */
+
+static bool  autoload_state_pending      = false;
+static bool  autoload_hotkey_pending     = false;  /* Num1 pressed → reset + autoload */
+static char  autoload_dir[AUTOLOAD_MAX_PATH]      = {0};   /* folder the core lives in */
+static char  autoload_rom_path[AUTOLOAD_MAX_PATH] = {0};   /* full path of the loaded ROM   */
+static char  autoload_core_name[64]      = {0};   /* this core's file name, no ext */
+static char  autoload_log_path[AUTOLOAD_MAX_PATH + 32] = {0};  /* resolved log file path */
+
 void libretro_logger(int log_level, const char *source)
 {
   retro_log_level log_mode = RETRO_LOG_INFO;
@@ -886,32 +919,8 @@ void retro_reset()
  * A line "[autoload] ..." is written both to the RetroArch log and to
  * "autoload.log" beside the core, so problems are easy to diagnose.       */
 
-#ifdef _WIN32
-#include <windows.h>
-#include <time.h>
-#define AUTOLOAD_STRCASECMP _stricmp
-#define AUTOLOAD_MAX_PATH   MAX_PATH
-#define AUTOLOAD_PATH_SEP   '\\'
-#else
-extern "C" {
-#include <dlfcn.h>
-}
-#include <time.h>
-#include <strings.h>
-#define AUTOLOAD_STRCASECMP strcasecmp
-#define AUTOLOAD_MAX_PATH   4096
-#define AUTOLOAD_PATH_SEP   '/'
-#endif
-
-#define AUTOLOAD_MAX_RUNS 25   /* keep only the latest N runs in autoload.log */
-#define AUTOLOAD_MAX_PATHS 16  /* max number of save_path entries in the config */
-
-static bool autoload_state_pending      = false;
-static bool autoload_hotkey_pending     = false;  /* Num1 pressed → reset + autoload */
-static char autoload_dir[AUTOLOAD_MAX_PATH]      = {0};   /* folder the core lives in */
-static char autoload_rom_path[AUTOLOAD_MAX_PATH] = {0};   /* full path of the loaded ROM   */
-static char autoload_core_name[64]      = {0};   /* this core's file name, no ext */
-static char autoload_log_path[AUTOLOAD_MAX_PATH + 32] = {0};  /* resolved log file path */
+/* autoload macros and globals are now defined above (before retro_load_game).
+ * The helper functions follow here. */
 
 /* Directory that THIS core (.dll/.so) lives in. */
 static void autoload_get_self_dir(char *out, size_t out_size)
