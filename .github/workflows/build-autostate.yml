@@ -1,6 +1,6 @@
 # .github/workflows/build-autostate.yml
 #
-# Builds the patched stella2023_libretro core for:
+# Builds the patched stella_libretro core for:
 #   • Windows 64-bit  (MinGW cross-compile on Ubuntu)
 #   • Windows 32-bit  (MinGW cross-compile on Ubuntu)
 #   • Linux 64-bit
@@ -13,7 +13,7 @@
 #
 # Trigger: every push and pull-request, plus manual dispatch.
 
-name: Build stella2023 autostate
+name: Build stella autostate
 
 on:
   push:
@@ -48,13 +48,13 @@ jobs:
                -j$(nproc)
 
       - name: Rename artifact
-        run: mv src/os/libretro/stella2023_libretro.dll stella2023_libretro_win64.dll 2>/dev/null || true
+        run: mv src/os/libretro/stella_libretro.dll stella_libretro_win64.dll 2>/dev/null || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: stella2023_libretro_win64
-          path: stella2023_libretro_win64.dll
+          name: stella_libretro_win64
+          path: stella_libretro_win64.dll
 
   # ------------------------------------------------------------------ #
   # Windows 32-bit (MinGW cross-compile)                               #
@@ -83,13 +83,13 @@ jobs:
                -j$(nproc)
 
       - name: Rename artifact
-        run: mv src/os/libretro/stella2023_libretro.dll stella2023_libretro_win32.dll 2>/dev/null || true
+        run: mv src/os/libretro/stella_libretro.dll stella_libretro_win32.dll 2>/dev/null || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: stella2023_libretro_win32
-          path: stella2023_libretro_win32.dll
+          name: stella_libretro_win32
+          path: stella_libretro_win32.dll
 
   # ------------------------------------------------------------------ #
   # Linux 64-bit                                                       #
@@ -117,13 +117,13 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: stella2023_libretro_linux64
-          path: src/os/libretro/stella2023_libretro.so
+          name: stella_libretro_linux64
+          path: src/os/libretro/stella_libretro.so
 
   # ------------------------------------------------------------------ #
   # Android — arm64-v8a / armeabi-v7a / x86_64                        #
   #                                                                    #
-  # The stella2023 Makefile has no dedicated "android" platform;       #
+  # The stella Makefile has no dedicated "android" platform;       #
   # it falls through to unix. We use platform=unix with the NDK       #
   # Clang toolchain overriding CC/CXX, and override SHARED to drop    #
   # the version-script (Android linker does not support it).          #
@@ -216,7 +216,7 @@ jobs:
             exit 1
           fi
 
-          # platform=unix sets TARGET=stella2023_libretro.so and fpic=-fPIC
+          # platform=unix sets TARGET=stella_libretro.so and fpic=-fPIC
           # We override SHARED: Android linker doesn't support --version-script
           # -ldl is essential for dladdr() used by autoload self-detection
           # -static-libstdc++ statically links libc++ so the core won't
@@ -234,10 +234,10 @@ jobs:
 
       - name: Stage artifact
         run: |
-          cp src/os/libretro/stella2023_libretro.so stella2023_libretro_${{ matrix.artifact_suffix }}.so
+          cp src/os/libretro/stella_libretro.so stella_libretro_${{ matrix.artifact_suffix }}.so
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: stella2023_libretro_${{ matrix.artifact_suffix }}
-          path: stella2023_libretro_${{ matrix.artifact_suffix }}.so
+          name: stella_libretro_${{ matrix.artifact_suffix }}
+          path: stella_libretro_${{ matrix.artifact_suffix }}.so
