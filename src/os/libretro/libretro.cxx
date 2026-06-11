@@ -12,6 +12,8 @@
 #endif
 
 #include "libretro.h"
+#include <string.h>
+#include <sys/stat.h>
 
 #include "StellaLIBRETRO.hxx"
 #include "Event.hxx"
@@ -51,6 +53,85 @@ static bool system_reset;
 static unsigned input_devices[4];
 static int32_t input_crosshair[2];
 static Controller::Type input_type[2];
+
+/* ---- Autoload Save State ---- */
+#define AUTOLOAD_MAX_PATH 4096
+static bool autoload_state_pending      = false;
+static bool autoload_hotkey_pending     = false;  /* Num1 pressed → reset + autoload */
+static char autoload_dir[AUTOLOAD_MAX_PATH]      = {0};
+static char autoload_rom_path[AUTOLOAD_MAX_PATH] = {0};
+static char autoload_core_name[64]      = {0};
+static bool autoload_enabled             = true;
+
+static void autoload_logf(const char *fmt, ...)
+{
+   if (!log_cb) return;
+   va_list ap;
+   va_start(ap, fmt);
+   log_cb(RETRO_LOG_INFO, fmt, ap);
+   va_end(ap);
+}
+
+static void autoload_try_load_state()
+{
+   if (!autoload_enabled || autoload_dir[0] == '\0' || autoload_rom_path[0] == '\0')
+      return;
+
+   /* Build the .state path: <save_dir>/<rom_name>.state */
+   const char *slash = strrchr(autoload_rom_path, '/');
+#ifdef _WIN32
+   const char *bslash = strrchr(autoload_rom_path, '\\');
+   if (bslash && (!slash || bslash > slash)) slash = bslash;
+#endif
+   const char *rom_name = slash ? slash + 1 : autoload_rom_path;
+
+   char state_path[AUTOLOAD_MAX_PATH];
+   snprintf(state_path, sizeof(state_path), "%s/%s.state", autoload_dir, rom_name);
+
+   /* Check if the state file exists */
+   struct stat st;
+   if (stat(state_path, &st) != 0)
+   {
+      autoload_logf("AUTOLOAD       : No save state found at %s", state_path);
+      return;
+   }
+
+   /* Read the state file */
+   FILE *f = fopen(state_path, "rb");
+   if (!f)
+   {
+      autoload_logf("AUTOLOAD       : Failed to open state file %s", state_path);
+      return;
+   }
+
+   size_t state_size = st.st_size;
+   void *state_data  = malloc(state_size);
+   if (!state_data)
+   {
+      fclose(f);
+      autoload_logf("AUTOLOAD       : Failed to allocate %zu bytes for state", state_size);
+      return;
+   }
+
+   if (fread(state_data, 1, state_size, f) != state_size)
+   {
+      free(state_data);
+      fclose(f);
+      autoload_logf("AUTOLOAD       : Failed to read state file %s", state_path);
+      return;
+   }
+   fclose(f);
+
+   /* Load the state */
+   if (stella.loadState(state_data, state_size))
+      autoload_logf("AUTOLOAD       : Loaded save state from %s", state_path);
+   else
+      autoload_logf("AUTOLOAD       : Failed to load save state from %s", state_path);
+
+   free(state_data);
+}
+
+/* ---- End Autoload Save State ---- */
 
 void libretro_logger(int log_level, const char *source)
 {
@@ -615,6 +696,14 @@ static void update_variables(bool init = false)
       stella_lightgun_crosshair = true;
   }
 
+  RETRO_GET("stella_autoload_state")
+  {
+    autoload_enabled = true;
+
+    if(!strcmp(var.value, "disabled"))
+      autoload_enabled = false;
+  }
+
   if(!init && !system_reset)
   {
     crop_left = setting_crop_hoverscan ? (stella.getVideoZoom() == 2 ? 32 : 8) : 0;
@@ -747,6 +836,7 @@ void retro_set_environment(retro_environment_t cb)
     { "stella_paddle_analog_deadzone", "Paddle analog deadzone; 15|16|17|18|19|20|21|22|23|24|25|26|27|28|29|30|0|1|2|3|4|5|6|7|8|9|10|11|12|13|14" },
     { "stella_paddle_analog_absolute", "Paddle analog absolute; disabled|enabled" },
     { "stella_lightgun_crosshair", "Lightgun crosshair; disabled|enabled" },
+    { "stella_autoload_state", "Autoload save state; enabled|disabled" },
     { NULL, NULL },
   };
 
@@ -845,6 +935,35 @@ bool retro_load_game(const struct retro_game_info *info)
 
   stella.setROM(info->path, info->data, info->size);
 
+  /* ---- Autoload: save directory and ROM path ---- */
+  const char *save_dir = NULL;
+  if (environ_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &save_dir) && save_dir && save_dir[0] != '\0')
+     snprintf(autoload_dir, sizeof(autoload_dir), "%s", save_dir);
+  else if (info->path && info->path[0] != '\0')
+  {
+     /* Fallback: use the ROM directory */
+     const char *last_slash = strrchr(info->path, '/');
+#ifdef _WIN32
+     const char *last_bslash = strrchr(info->path, '\\');
+     if (last_bslash && (!last_slash || last_bslash > last_slash)) last_slash = last_bslash;
+#endif
+     if (last_slash)
+     {
+        size_t dir_len = last_slash - info->path;
+        if (dir_len >= AUTOLOAD_MAX_PATH) dir_len = AUTOLOAD_MAX_PATH - 1;
+        memcpy(autoload_dir, info->path, dir_len);
+        autoload_dir[dir_len] = '\0';
+     }
+  }
+  if (info->path)
+     snprintf(autoload_rom_path, sizeof(autoload_rom_path), "%s", info->path);
+  snprintf(autoload_core_name, sizeof(autoload_core_name), "%s", "stella2023");
+
+  autoload_state_pending  = true;
+  autoload_hotkey_pending = false;
+  autoload_logf("AUTOLOAD       : ROM=%s  SaveDir=%s  Core=%s", autoload_rom_path, autoload_dir, autoload_core_name);
+  /* ---- End Autoload setup ---- */
+
   return reset_system();
 }
 
@@ -873,6 +992,31 @@ void retro_run()
     reset_system();
     update_system_av();
     return;
+  }
+
+  /* ---- Autoload: load save state after ROM init ---- */
+  if (autoload_state_pending)
+  {
+     autoload_state_pending = false;
+     autoload_try_load_state();
+  }
+
+  /* ---- Hotkey: Numpad 1 → reset game + autoload save state ---- */
+  if (autoload_hotkey_pending)
+  {
+     autoload_hotkey_pending = false;
+     autoload_logf("HOTKEY        : Num1 pressed — resetting game + autoload");
+     retro_reset();
+     autoload_state_pending = true;
+     /* autoload_try_load_state() will run on the next frame */
+     return;
+  }
+  {
+     static bool num1_was_pressed = false;
+     bool num1_is_pressed = input_state_cb(0, RETRO_DEVICE_KEYBOARD, 0, RETROK_KP1);
+     if (num1_is_pressed && !num1_was_pressed && autoload_rom_path[0] != '\0')
+        autoload_hotkey_pending = true;
+     num1_was_pressed = num1_is_pressed;
   }
 
   update_input();
